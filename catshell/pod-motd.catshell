@@ -1,0 +1,46 @@
+#!/bin/bash
+# MOTD to show the status of the pod on login, just above the catshell splash.
+
+serveruptime=$(
+    upseconds=$(cat /proc/uptime | cut -d. -f1 | cut -d' ' -f1 )
+    echo -n $((${upseconds} / 86400)).
+    upseconds=$((${upseconds} % 86400))
+    echo -n $((${upseconds} / 3600)):
+    upseconds=$((${upseconds} % 3600))
+    echo -n $((${upseconds} / 60)):
+    upseconds=$((${upseconds} % 60))
+    echo -n ${upseconds}
+ )
+serveruptime="${MAGENTA}Up: ${BOLD}${serveruptime}${NORMAL}"
+serverloadinfo="${BLUE}Ld: ${BOLD}$(cut -d' ' -f -3 /proc/loadavg)${NORMAL}"
+onlineusers="${CYAN}U: ${BOLD}$(who | awk '{print $1}' | grep -v $(whoami)|sort|uniq|tr '\n' ' ')${NORMAL}"
+echo -e "--  ${serveruptime} -- ${serverloadinfo} -- ${onlineusers} --"
+
+# This needs some work, but it works for now:
+
+function service_check() {
+  services="\
+  ProFTP@/var/run/proftpd.pid
+  memcached@/var/run/memcached.pid
+  NewRelic@/var/run/newrelic-daemon.pid
+  nginx@/var/run/nginx.pid
+  apache@/var/run/apache2/apache2.pid
+  Zabbix@/var/run/zabbix/zabbix_agentd.pid
+  Varnish@/var/run/varnishd.pid
+  SSH@/var/run/sshd.pid"
+
+  servicesonline='' servicesoffline=''
+  for service in ${services}; do
+    if [[ -f ${service##*@} ]] ; then
+      if [[ $(ps -o pid= -p $(cat ${service##*@})) ]] ; then
+        servicesonline="${servicesonline}${service%%@*} "
+      else
+        servicesoffline="${servicesoffline}${service%%@*} "
+      fi
+    fi
+  done
+  echo "${BOLD}${GREEN}Online: ${NORMAL}${GREEN}${servicesonline}${NORMAL}"
+  [[ -n ${servicesoffline} ]] && echo "${RED}Offline: ${BOLD}${servicesoffline}${NORMAL}"
+}
+
+#service_check

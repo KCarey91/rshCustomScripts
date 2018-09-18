@@ -1,0 +1,34 @@
+#! /bin/bash
+
+## Provides help with catshell
+##
+##   meow                   ::  List help categories/Topics
+##   meow {cat}             ::  Provide information about the category
+##   meow {cat} {function}  ::  Provide details about a function
+##
+## Note: category info is from .help files in each subfolder of catshell
+##       function information is from comments prepended by ##
+
+SOURCE=$(cd $(dirname ${BASH_SOURCE[0]});pwd)
+source ${SOURCE}/color_cat
+if [[ -z $1  ]]
+ then echo -e "${MAGENTA}For more details:  ${BRIGHT}meow ${GREEN}(category)${NORMAL} ${GREEN}[command]${NORMAL}\c"
+  for dir in ${SOURCE}/{func,scripts,wpe,fun}
+    do echo -e "\n${BRIGHT}${GREEN}${dir##*/}${NORMAL}"
+      for file in $(find $dir -type f -not -name "\.*")
+        do echo -e "  ${GREEN}$(basename ${file%.*})${NORMAL} \c"
+      done
+   done
+elif [[ ! -z $1 && -z $2 ]]
+  then [[ -d ${SOURCE}/$1 ]] && cat ${SOURCE}/$1/.help || echo -e "${RED}Argument 1 is not a Category. :<${NORMAL}"
+elif [[ ! -z $1 && ! -z $2 ]]
+  then match=$(find ${SOURCE}/$1 -type f -iname "${2}.*")
+  if [[ ! $match == "" ]]
+    then for file in ${match}
+          do echo; grep "^##" $file | while read line
+                                 do echo "${line##\#\#}"
+                                done
+          done
+   else echo -e "${RED}Argument 1 must be a category; Argument 2 must be a topic.${NORMAL}"
+  fi
+fi; echo

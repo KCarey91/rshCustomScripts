@@ -1,0 +1,199 @@
+#! /bin/bash
+
+##  This is *really* OLD and needs a rewrite, but it's functional.
+##
+ ###########################################################################
+##  Checks an IP against a bunch of blacklists to see if they're listed.
+##    It should list off a recommended priority, High, Medium or Low.
+##      High = This will cause some problems...
+##      Medium = May cause problems; mostly unknown priorities in here.
+##      Low = Probably Can't Fix (Payment req, no WL requests taken, etc)
+##
+##    Usage:  ispbl IP [-vth]
+##     -v : verbose-print off all results, regardless of listed status
+##     -t : Also grab the TXT records which may give delisting info
+##     -l : Input a list of IPs to check. Delayed output/multiple processes
+##     -h : Print off help information. Triggers if IP looks incorrect.
+##
+##   You can also pipe to a pastebin if you have such a  command
+##    Progress messages are now output to STDERR so it doesn't pollute
+##     the hpaste output and you can see the progress while it's working.
+ ###########################################################################
+
+bldred='\033[1;31m' # Red
+bldgrn='\033[1;32m' # Green
+bldblu='\033[1;34m' # Blue
+txtylw='\033[0;33m' # Orange
+bldcyn='\033[1;36m' # Cyan
+txtrst='\033[0m'    # Text Reset
+unset do_check full_check
+
+# Parse arguments
+args=$*
+[[ "$(echo $args | grep '\-[a-z]*v[a-z]*')" != "" ]] && verbose=1   || verbose=0
+[[ "$(echo $args | grep '\-[a-z]*t[a-z]*')" != "" ]] && txt=1       || txt=0
+[[ "$(echo $args | grep '\-[a-z]*l[a-z]*')" != "" ]] && list_mode=1 || list_mode=0
+[[ "$(echo $args | grep '\-[a-z]*h[a-z]*')" != "" ]] && do_check=0
+[[ "$(echo $args | grep '\-[a-z]*f[a-z]*')" != "" ]] && full_check=1
+args=$(echo ${args} | sed 's|-[a-z]\+||g') # Remove flags from args
+
+# To add a new blacklist:
+#    'bl=(P:PRIORITY BLACKLIST.NAME)'
+# Priorities:  P:Med for default
+#   High= P:Hig   Med= P:Med   Low= P:Low
+declare -a ispbl=(
+  ## High Priority ##
+  'bl=(P:Hig bl.spamcop.net)'
+  'bl=(P:Hig zen.spamhaus.org)'
+  'bl=(P:Hig b.barracudacentral.org)'
+  'bl=(P:Hig cbl.abuseat.org)'
+  'bl=(P:Hig psbl.surriel.com)'
+  ##  Medium Priority ##
+  'bl=(P:Med problems.dnsbl.sorbs.net)'
+  'bl=(P:Med bl.mailspike.net)'
+  'bl=(P:Med hostkarma.junkemailfilter.com)'
+  'bl=(P:Med ix.dnsbl.manitu.net)'
+  ## Low Priority / Ignore ##
+  'bl=(P:Low dnsblchile.org)'
+)
+
+# Full DNSBL list for -f (full check) mode
+if [[ $full_check ]]
+ then declare -a ispbl=(
+    ## High Priority ##
+    'bl=(P:Hig bl.spamcop.net)'
+    'bl=(P:Hig pbl.spamhaus.org)'
+    'bl=(P:Hig sbl.spamhaus.org)'
+    'bl=(P:Hig xbl.spamhaus.org)'
+    'bl=(P:Hig zen.spamhaus.org)'
+    'bl=(P:Hig cart00ney.surriel.com)'
+    'bl=(P:Hig psbl.surriel.com)'
+    'bl=(P:Hig dnsbl.sorbs.net)'
+    'bl=(P:Hig dul.dnsbl.sorbs.net)'
+    'bl=(P:Hig new.dnsbl.sorbs.net)'
+    'bl=(P:Hig old.dnsbl.sorbs.net)'
+    'bl=(P:Hig recent.dnsbl.sorbs.net)'
+    'bl=(P:Hig misc.dnsbl.sorbs.net)'
+    'bl=(P:Hig smtp.dnsbl.sorbs.net)'
+    'bl=(P:Hig http.dnsbl.sorbs.net)'
+    'bl=(P:Hig ubl.unsubscore.com)'
+    'bl=(P:Hig block.dnsbl.sorbs.net)'
+    'bl=(P:Hig spam.dnsbl.sorbs.net)'
+    'bl=(P:Hig zombie.dnsbl.sorbs.net)'
+    'bl=(P:Hig escalations.dnsbl.sorbs.net)'
+    'bl=(P:Hig web.dnsbl.sorbs.net)'
+    'bl=(P:Hig socks.dnsbl.sorbs.net)'
+    'bl=(P:Hig b.barracudacentral.org)'
+    'bl=(P:Hig ips.backscatterer.org)'
+    'bl=(P:Hig bl.mailspike.net)'
+    'bl=(P:Hig bl.spamcannibal.org)'
+    'bl=(P:Hig dialups.mail-abuse.org)'
+    'bl=(P:Hig cbl.abuseat.org)'
+    ##  Medium Priority ##
+    'bl=(P:Med black.junkemailfilter.com)'
+    'bl=(P:Med bl.shlink.org)'
+    'bl=(P:Med dnsbl.antispam.or.id)'
+    'bl=(P:Med korea.services.net)'
+    'bl=(P:Med spamguard.leadmon.net)'
+    'bl=(P:Med spam.olsentech.net)'
+    'bl=(P:Med dnsbl.anticaptcha.net)'
+    'bl=(P:Med rbl.snark.net)'
+    'bl=(P:Med relays.nether.net)'
+    'bl=(P:Med rsbl.aupads.org)'
+    'bl=(P:Med tor.dnsbl.sectoor.de)'
+    'bl=(P:Med bogons.cymru.com)'
+    'bl=(P:Med dev.null.dk)'
+    'bl=(P:Med dnsbl.tornevall.org)'
+    'bl=(P:Med dialup.blacklist.jippg.org)'
+    'bl=(P:Med duinv.aupads.org)'
+    'bl=(P:Med dialups.visi.com)'
+    'bl=(P:Med spamsources.fabel.dk)'
+    'bl=(P:Med hil.habeas.com)'
+    'bl=(P:Med dnsbl.justspam.org)'
+    'bl=(P:Med dnsbl.kempt.net)'
+    'bl=(P:Med pss.spambusters.org.ar)'
+    'bl=(P:Med rbl.schulte.org)'
+    'bl=(P:Med dnsbl.abuse.ch)'
+    'bl=(P:Med dnsbl.dronebl.org)'
+    'bl=(P:Med relays.bl.kundenserver.de)'
+    'bl=(P:Med blacklist.sci.kun.nl)'
+    'bl=(P:Med dyn.shlink.org)'
+    'bl=(P:Med blocked.hilli.dk)'
+    'bl=(P:Med blackholes.wirehub.net)'
+    'bl=(P:Med intruders.docs.uu.se)'
+    'bl=(P:Med opm.tornevall.org)'
+    'bl=(P:Med dul.ru)'
+    'bl=(P:Med cblless.anti-spam.org.cn)'
+    'bl=(P:Med rbl.megarbl.net)'
+    'bl=(P:Med no-more-funn.moensted.dk)'
+    'bl=(P:Med access.redhawk.org)'
+    'bl=(P:Med mail-abuse.blacklist.jippg.org)'
+    ## Low Priority / Ignore ##
+    'bl=(P:Low dnsblchile.org)'
+    'bl=(P:Low dnsbl-1.uceprotect.net)'
+    'bl=(P:Low dnsbl-2.uceprotect.net)'
+    'bl=(P:Low dnsbl-3.uceprotect.net)'
+    'bl=(P:Low l2.apews.org)'
+    'bl=(P:Low relays.bl.gweep.ca)'
+    'bl=(P:Low proxy.bl.gweep.ca)'
+    'bl=(P:Low msgid.bl.gweep.ca)'
+    'bl=(P:Low dnsbl.inps.de)'
+  )
+fi
+
+function print_help() { echo -e "
+ Usage:  ispbl <ip(s)> (flags)
+ (IP address(es) and flags may be in any order)
+    -v :: Verbose mode prints off status of all blacklists whether or not the IP is listed.
+    -t :: Also digs TXT records.  These often contain blacklist names and de-listing URLs.
+    -l :: Accept a list of IPs rather than a single.  Output is not immediate like single-IP mode.
+          The 'multithreading' has potential to open many processes if fed extremely large IP lists.
+    -f :: Perform a much larger check over a wider range of ISPBL dns lookups.
+    -h :: Shows this help dialog. This also appears if the IP address doesn't look right. "
+}
+
+
+function ispbl() {
+  ip=$(echo $1| awk -F "." '{print $4"."$3"."$2"."$1}')
+  if [[ $(echo ${ip} | egrep "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+") == "" ]]
+   then echo -e "${bldred}!!! IP seems mis-formed.  Skipping. (${ip}) !!!${txtrst}" ; print_help
+  else
+   total=${#ispbl[@]}
+   current=1
+   echo -e "\n${bldblu}Blacklists Check: $1  ($total checks)${txtrst}"
+    for bl in "${ispbl[@]}"
+     do eval "$bl"
+      >&2 echo -ne "($current / $total)     \r"
+        if [[ "$(dig +short $ip.${bl[1]} +time=3|grep -v 'timed out')" != "" ]]
+         then ## Setting some colors for different priorities.
+          [[ "${bl[0]}" == "P:Hig"  ]] && echo -e "${bldred}\c"
+          [[ "${bl[0]}" == "P:Med"  ]] && echo -e "${txtylw}\c"
+          [[ "${bl[0]}" == "P:Low"  ]] && echo -e "${bldcyn}\c"
+          [[ "$txt" == "1" ]] && txtrecord="\n\t(TXT=$(dig +short $ip.${bl[1]} TXT +time=3 |grep -v 'connection timed out'))"
+          echo -e "[${bl[0]}] -- Blacklisted on ${bl[1]}${txtrst} $txtrecord"
+        else [[ "$verbose" == "1" ]] && echo -e "${bldgrn}[Is OK] -- ${bl[1]}${txtrst}"
+        fi
+        current=$(($current+1))
+    done
+    ip=$(echo ${ip}| awk -F "." '{print $4"."$3"."$2"."$1}')
+    rdns=$(host ${ip}|grep -v "not found") ; rdns=${rdns#*pointer} ; rdns=${rdns%.}
+    echo -e "${bldblu}${ip} rDNS: ${rdns} ${txtrst}"
+  fi
+}
+
+if [[ ${do_check} == "0" ]]
+ then print_help
+else
+  if [[ ${list_mode} == "1" ]]
+  then >&2 echo -e "\nPerforming checks in list mode. Individual results will show up after the full range of tests has completed."
+   for ip in ${args}
+    do echo -e "$(ispbl ${ip} 2>/dev/null )" &
+       jobs="${jobs} $!"
+   done
+   ## Wait for all jobs to complete before exiting.
+   for job in ${jobs}
+    do wait ${job}
+   done
+  else ispbl ${args}
+  fi
+fi

@@ -1,0 +1,46 @@
+#! /bin/bash
+#Setting up some useful aliases
+
+## purr : list aliases
+# Comment format:  Start with double-hash, space, command name, space, explanation
+#   ## example : this is what it should look like
+#
+purr() { echo -e "\n     \033[4;32mThis is a list of Aliases added by CatShell\033[0m"
+  grep '^##' $BASH_SOURCE | sed 's|^##||g' | awk -F':' '{printf "\033[1;32m%-30s\033[0;32m|%s\033[0m\n",$1,$2}'
+  echo -e "\n     \033[4;32mThis is a list of Aliases available on pods\033[0m"
+  grep '^##' ${BASH_SOURCE}_pod | sed 's|^##||g' | awk -F':' '{printf "\033[1;32m%-30s\033[0;32m|%s\033[0m\n",$1,$2}'
+}
+
+## now : print current date/time in filename-friendly format. e.g. 2015-07-24_15:06:19
+alias now='date +%Y-%m-%d_%H.%M.%S'
+alias ll='ls -hal'
+
+## sin : List top inode directories within current directory
+alias sin='(echo;find . -mindepth 1 -maxdepth 1 -type d | while read dir; do echo -e "$(find "$dir" | wc -l)\t$dir"|sed "s|./| |g";done|sort -nr|head -n 10;echo) 2>/dev/null'
+## sds : List top directories by size within current directory (including dotfiles)
+alias sds='find . -maxdepth 1 -mindepth 1 | xargs du -sh  | sort -rh'
+## sds2 : another version of sds in case sort doesn't accept the -h flag
+alias sds2='find . -maxdepth 1 -mindepth 1|xargs du -sk | sort -rn | cut -f2 | xargs du -sh'
+
+## pscputop : watch load average and top processes in an easy-to-read way
+function pscputop() { watch -n 1 'cat /proc/loadavg;echo;_cpu_ps=$(ps -eo pcpu,pmem,rss,vsize,args);echo "${_cpu_ps}"|head -n 1;echo "${_cpu_ps}"|tail -n +2|sort -k 1 -rn';}
+## psmemtop : watch memory usage in an easy-to-read way
+function psmemtop() { watch '_mem_ps=$(ps -eo pmem,pcpu,rss,vsize,args) ; echo "${_mem_ps}" | head -n1 ; echo "${_mem_ps}" | tail -n +2 | sort -k1 -rn | head ';}
+
+## unzip-stream : Unzip from a pipe into current directory - e.g.  curl (zipfile) | unzip-stream
+alias unzip-stream="python -c \"import zipfile,sys,StringIO;zipfile.ZipFile(StringIO.StringIO(sys.stdin.read())).extractall(sys.argv[1] if len(sys.argv) == 2 else '.')\""
+
+## hairballs : show most recent 25 lines of change/commit log for catshell.
+function hairballs() {
+    echo -e "\n\033[1;32mFull Change Log:\033[0m https://eremite.moe/wpe/catshell/gitlog.txt\n"
+    curl -A 'catshell-updater' -sL "https://eremite.moe/wpe/catshell/gitlog.txt" 2>/dev/null | head -n25 | awk -F'#' '{print "\033[1;32m",$1,"#\033[0;32m",$2}'
+}
+
+## flushdns : Clear out DNS cache on Mac workstation.
+alias flushdns='[[ ! $(uname -n) =~ ^(utility|web|dbmaster|pod)- ]] && (sudo dscacheutil -flushcache;sudo killall -HUP mDNSResponder; echo -e "\033[1;32mDNS Cache Flushed.\033[0m") || echo "Cannot be run on a pod. :("'
+
+## show_ansi_colors : Show the colors available for terminal for using when making scripts.
+alias show_ansi_colors='echo "reg|bold" ; for i in {30..36} ; do echo -e "\033[0;${i}m ${i} \033[1;${i}m ${i} \033[0m" ; done'
+
+## up : up NUMBER : Move up NUMBER directories.  EG:  /nas/content/live ->  up 2 -> /nas
+function up() { cdtar="";for i in $(seq 1 $1) ; do cdtar+="../";done;cd ${cdtar}; }

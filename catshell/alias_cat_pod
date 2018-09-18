@@ -1,0 +1,66 @@
+#! /bin/bash
+#Setting up some useful aliases that only are useful on pods
+
+## html2ascii : convert html to viewable text via lynx when piped or pasted with heredocs
+# Got a hot mess of HTML in a ticket or curl or  wherever and you just want to get rid of all that
+#  extra junk in the trunk?  Pipe HTML to html2ascii to have it in normal text format.
+#   cat file.txt | html2ascii   OR
+#   curl URL | html2ascii       OR
+#   html2ascii << EOF
+#   > paste HTML and then type in EOF
+#   > EOF
+alias html2ascii='lynx -force_html -stdin -dump -nolist --width=220'
+
+## ngstat : nginx status page in terminal friendly format, sorted by
+alias ngstat='_nstat_text=$(lynx -dump --width 240 http://localhost:6789/server-status | awk "/PID.*Acc/{flag=1}/_____/{flag=0}flag") ; echo "${_nstat_text}" | head -n 1 ; echo "${_nstat_text}" | tail -n +2 | sort -rnk5'
+
+## file_lock_watch : watches for D-status processes and lists open file descriptors it holds within /nas/content (for high load from uninterruptible sleeps)
+alias file_lock_watch="while true ; do ps -eo pid,stat| grep -oP '.*(?= D$)'| xargs -n1 -I@ ls -al /proc/@/fd 2>/dev/null| grep '/nas/content/' ; sleep .5 ; done"
+
+## ntail : tail nginx log
+alias ntail='tail -n0 -F /var/log/nginx/$(pwd | cut -d/ -f5).access.log'
+## atail : tail apache log (access)
+alias atail='tail -n0 -F /var/log/apache2/$(pwd|cut -d/ -f5).access.log'
+## atails : tail apache access logs for staging
+alias atails='tail -n0 -F /var/log/apache2/staging-$(pwd|cut -d/ -f5).access.log'
+## etail : tail apache log (error)
+alias etail='tail -n0 -F /var/log/apache2/$(pwd|cut -d/ -f5).error.log'
+## etails : tail apache log (error) for staging
+alias etails='tail -n0 -F /var/log/apache2/staging-$(pwd|cut -d/ -f5).error.log'
+
+## mailgrep : grep the user from the mail log
+alias mailgrep='grep "$(echo -n $(pwd|cut -d/ -f5) | sha1sum |awk "{print \$1}")" /var/log/mail.log*'
+
+## staging-production-diff : Show differences in files between staging & production. Must be in user's staging or production directory. Hilit for readability.
+alias staging-production-diff='green="\x1b[1;32m" red="\x1b[1;31m" plain="\x1b";if [[ -n $(pwd|cut -d/ -f5) ]] ; then diff -rq /nas/wp/www/{sites,staging}/$(pwd|cut -d/ -f5) | sed -e "s|\(/nas/wp/www/sites/[^:]\+\)|${green}\1 ${plain}[0m|g" -e "s|\(/nas/wp/www/staging/[^:]\+\)|${red}\1 ${plain}[0m|g" ; fi'
+
+## date2 : The 'date' command, but print both the UTC time and the CST time at once to avoid head maths.
+alias date2='{ date ; TZ=US/Central date ; } | egrep --color "(UTC|C[DS]T)"'
+
+## wp (as root) : aliased to sudo -u www-data wp for safty when logged in as root
+[[ $(whoami) == root ]] && alias wp="sudo -u www-data $(which wp)"
+
+## waldo : Overrides the redshell 'waldo' alias when root user so that it doesn't have a path error
+if [[ $(whoami) == root ]] ; then
+  SOURCE=$(cd $(dirname ${BASH_SOURCE[0]});pwd)
+  alias waldo="python ${SOURCE%/catshell}/../rsh_core/l2/waldo.py"
+fi
+
+## fileswatch : watch for open files in /nas to see what might be using a lot of disk i/o
+alias fileswatch="while true ; do ps aux | grep ' [D] ' | awk '{print $2}' | xargs -n1 -I@ ls -al /proc/@/fd/ | grep /nas ; sleep .1 ; done"
+
+## cronwatch : watch what all cron threads are doing.
+alias cronwatch=" watch 'pgrep cron | xargs -n 1 pstree -al'"
+
+## sstat : service --status-all with some greps and colors for the most relevant services.
+alias sstat='service --status-all 2>&1 | egrep "(apache2|apparmor|memcached|mysql|nginx|postfix|proftpd|ssh|varnish|zabbix-agent)$"|sed -e "s|\+|${GREEN}+${NORMAL}|g" -e "s|-|${RED}-${NORMAL}|" -e "s|\?|${YELLOW}?${NORMAL}|g"'
+
+## akilled : show all killed apache processes sorted by most frequent.
+alias akilled="awk -F ' |:|=' '{print \$12 \$16}' /var/log/apache-killed-by-wpe.log | sort | uniq -c | sort -rn"
+
+## bwu : Top Bandwidth usage by install based on the $body_bytes_sent column of nginx logs.
+bwu() {
+  for i in $(ls /nas/content/live/) ; do
+    awk -F'|' '{tot+=6} ; END {print tot,install}' install=$i /var/log/nginx/${i}.access.log 2>/dev/null
+  done | sort -rn
+}

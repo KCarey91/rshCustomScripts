@@ -1,0 +1,4 @@
+##  Scripts either cause problems when sourced (variable persistency, etc), or are non-bash scripts. (.py, etc)
+##    so they are invoked via bash or python commands as aliases.
+##  Catshell's init file should automatically create aliases for these,
+##    assuming that they end in .sh for shell script files and .py for python scripts.

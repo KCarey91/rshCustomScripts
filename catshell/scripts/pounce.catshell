@@ -1,0 +1,426 @@
+#! /bin/bash
+## Run 'pounce' with no arguments for help.
+#  or see the _usage_info at the bottom for details.
+
+# Bail out if it's on a server.
+if [[ -f /etc/cluster-id ]] ; then
+  echo "Not usable from a pod/cluster."; exit
+fi
+
+# ############################################
+# #### Individual Settings.  Edit these: #####
+# ############################################
+sshuser=$(grep -v '^#' ~/redshell/sshuser)
+
+# Sticking with default redshell for now.
+rsyncdirs="~/redshell/catapult/"
+# Remote directory to sync to on the server.
+# Should be blank for redshell compatibility.
+remotedir=''
+
+# ############################################
+# #### Preferences.    Edit if needed.   #####
+# ############################################
+# Reuse SSH Connections for faster Connections if you already have
+#  an existing session on the pod in question.  (faster SSH)
+reuse_ssh_connection=1
+# We'll use this for caching where we've been recently to skip rsync
+#  and drasically reduce connection time to 'cached' pods.
+rsynccachefile="/tmp/tabinikki"
+rsynccachetime="28800"
+# Connect timeout to use for curls. --connect-timeout=
+# 1 should suffice unless pod's under extreme load or DDoS.
+curltimeout=1
+
+
+# ############################################
+# #### Variables we will need later on.  #####
+# ############################################
+# The ProxyCommand to get through to Bastion.  Should avoid people having
+#  problems with a derped up ~/.ssh/config file.
+sshproxyconf="ProxyCommand ssh -q -W %h:%p ${sshuser}@bastion -o Hostname=bastion.wpengine.io"
+#  SSH Flags to use when connecting. Should make things fast and painless.
+sshflags="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=quiet -o ConnectTimeout=5 -o PreferredAuthentications=publickey -o ForwardAgent=no"
+#  If we're reusing SSH connections, append the appropriate SSH options.
+#    ControlPersist is required to set up a background master process to
+#    avoid having the master session 'hang' when disconnecting.
+if [[ ${reuse_ssh_connection} == 1 ]] ; then
+  sshflags="${sshflags} -o ControlMaster=auto -o ControlPath=/tmp/%r@%h:%p -o ControlPersist=300"
+fi
+
+# Get the IP address returned by our wildstar setting for IP checks later.
+wildstarip=$(dig +short this-parrot-has-ceased-to-be.wpengine.com)
+# Get the IP of pod-47 for hitting to enumerate hosts in a cluster.
+ip47=$(dig +short pod-47.wpengine.com|tail -n1)
+
+# Regex for matching an IP address because it's huge.
+ipregex="^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$"
+
+# Colors for making things pretty.
+BLACK=$(tput setaf 0)
+RED=$(tput setaf 1)
+GREEN=$(tput setaf 2)
+CYAN=$(tput setaf 6)
+BOLD=$(tput bold)
+NORMAL=$(tput sgr0)
+
+# Setting some formatting for error/status messsages.
+bgc=$(tput setab 4)
+_statuscat="${bgc}${BLACK}=(${BOLD}${GREEN}^${NORMAL}${bgc}${BOLD}${CYAN}ᴥ${BOLD}${GREEN}^${NORMAL}${bgc}${BLACK})=${NORMAL}"
+bgc=$(tput setab 1)
+_errorcat="${bgc}${BLACK}=(${BOLD}${GREEN}x${NORMAL}${bgc}${BOLD}${CYAN}ᴥ${BOLD}${GREEN}x${NORMAL}${bgc}${BLACK})=${NORMAL}"
+
+# Misc icon thingers for the messages.
+_ticon="${BOLD}${RED}⌖${NORMAL}"
+_interrorbang="${BOLD}${RED}Wat‽${NORMAL} "
+
+unset bgc
+# The actual functions for error/status messages.
+_pmsg() {
+    echo -e "${_statuscat} : $*"
+}
+_perr() {
+    echo -e "${_errorcat} : $*"
+}
+
+
+# ############################################
+# #### Utility Functions : Resolvers     #####
+# ############################################
+# This'll be recursed into as subchecks return a result.
+function _resolve_input_to_ip() {
+   if [[ ${1} =~ ${ipregex} ]] ; then
+     _check_ip_address $*
+   elif [[ ${1} =~ ^[0-9]+$ ]]; then
+     _get_target_from_cid $*
+   elif [[ ${1} =~ ^(web|utility)-9[0-9]{4}-i-.+$ ]] ; then
+     _pmsg "Specific AWS Server Specified: ${BOLD}${1}.wpengine.com${NORMAL}"
+     _resolve_input_to_ip $(_dig_ip ${1}.wpengine.com)
+   elif [[ ${1} =~ ^(pod|utility|web|dbmaster)-([^.-]+) ]] ; then
+     _cid=${BASH_REMATCH[2]}
+     if [[ ${1} =~ ^(utility|dbmaster)- ]]; then
+       # If cluster is specified, snag the first letter of hostname if available.
+       _get_target_from_cid ${_cid} ${*:2} ${1:0:1}
+     elif [[ ${1} =~ ^web-${_cid}-([0-9]+) ]];then
+       _get_target_from_cid ${_cid} ${*:2} ${BASH_REMATCH[1]}
+     else
+       _get_target_from_cid ${_cid} ${*:2}
+     fi
+   elif [[ ${1} =~ (^|/)([a-z0-9A-Z]+)(.wpengine.com|$) ]] ; then
+     _pmsg "Install or WPE URL Detected: ${BOLD}${1}${NORMAL}"
+     if [[ ${1} =~ [./\#\?:] ]] ; then
+       _base_domain=$(_clean_url_to_base_domain ${1})
+       _pmsg "Stripped extraneous characters: ${BOLD}${_base_domain}${NORMAL}"
+       _base_domain=${_base_domain%.wpengine.com}.wpengine.com
+     else
+       _base_domain=${1}.wpengine.com
+       _pmsg "Install name uses URL : ${BOLD}${_base_domain}${NORMAL}"
+     fi
+     _resolve_domain_to_cid ${_base_domain} ${*:2}
+   elif [[ ${1} =~ .+\..+ ]] ; then
+     _pmsg "Domain or URL Detected: ${BOLD}${1}${NORMAL}"
+     _base_domain=$(_clean_url_to_base_domain ${1})
+     _pmsg "Stripped to base domain: ${BOLD}${_base_domain}${NORMAL}"
+     _resolve_domain_to_cid ${_base_domain} ${*:2}
+   elif [[ ${1} =~ ^$ ]] ; then
+     _perr "${_interrorbang} No target specified?  Looks like you need some help: "
+     _usage_info
+     return 1
+   else
+     _perr "${_interrorbang} I have no idea what you're talking about."
+     _usage_info
+     return 1
+   fi
+}
+
+_clean_url_to_base_domain() {
+  _d_input=${1}
+  _d_input=${_d_input#*://} # strip http:// or https://
+  _d_input=${_d_input%%/*}  # strip all after trailing slash.
+  _d_input=${_d_input%%#*}  # strip all after trailing anchor tag.
+  _d_input=${_d_input%%\?*}  # strip query in case of no preceeding slash.
+  echo ${_d_input}
+}
+
+_resolve_domain_to_cid() {
+  _pmsg "Resolving based on domain input: ${BOLD}${1}${NORMAL}"
+  _get_cid_from_cdncheck $* && return 0
+  _domain_ip=$(_dig_ip ${1})
+  if [[ -n ${_domain_ip} ]] ; then
+    _pmsg "Attempting to resolve an IP from domain: ${1}"
+    _resolve_input_to_ip ${_domain_ip} ${*:2}
+  else
+    _perr "Unable to dig an IP. Check DNS or domain spelling."
+  fi
+}
+
+_get_cid_from_cdncheck() {
+  _pmsg "Attempting to get CID from curling ${BOLD}${1}/-wpe-cdncheck-${NORMAL}"
+  _cdncheck=$(curl --connect-timeout ${curltimeout} -sIL ${1}/-wpe-cdncheck-)
+  _cdncheck_cid=$(echo "${_cdncheck}"|awk '/X-WPE-Cluster/ {print $2}'|tr -d '\r'|tail -n1)
+  targetinstall=$(echo "${_cdncheck}"|awk '/X-WPE-Install/ {print $2}'|tr -d '\r'|tail -n1)
+  if [[ -n ${_cdncheck_cid} ]]; then
+    _get_target_from_cid $_cdncheck_cid ${*:2}
+  else
+    _perr "${BOLD}${RED}No X-WPE-Cluster Header? ${BOLD}${RED}Derpy Config? Not Pointed? Disabled?${NORMAL}"
+    return 1
+  fi
+}
+
+_get_target_from_cid() {
+   _pmsg "Parsing input as CID : ${BOLD}${1}${NORMAL}"
+   case ${1} in
+     6????) _pmsg "RAX Cluster detected.  Checking our options.";
+            _parse_rax_cid $* ;;
+     9????) _pmsg "AWS Cluster detected.  Checking our options.";
+            _parse_aws_cid $* ;;
+     *) _pmsg "Pod detected. Resolving to an IP address." ;
+       _resolve_input_to_ip $(_dig_ip "pod-${1}.wpengine.com") ;;
+   esac
+}
+
+# Super simple, but separating it in case I find a way of speeding up dig.
+_dig_ip() {
+   dig +short ${1} | tail -n1
+}
+
+_rsync_if_needed() {
+  [[ -f ${rsynccachefile} ]] || touch ${rsynccachefile}
+  _pmsg "Checking for IP ${BOLD}${1}${NORMAL} in rsync cache file: (${BOLD}${rsynccachefile}${NORMAL})"
+  _needsync=$(awk '/^'${1}' / {print}' ${rsynccachefile}|tail -n1)
+  if [[ -z $_needsync ]]; then
+    _pmsg "${BOLD}${CYAN}⇝${NORMAL} Rsync Needed: IP ${BOLD}not listed${NORMAL} in rsync cache."
+  elif [[ ${_needsync#* } -lt $(($(date +%s) - ${rsynccachetime})) ]] ; then
+    _pmsg "${BOLD}${CYAN}⇝${NORMAL} Rsync Needed: Last sync > ${BOLD}${rsynccachetime}${NORMAL} seconds ago. (${BOLD}$(date -r ${_needsync#* })${NORMAL})"
+  else
+    _pmsg "${BOLD}${GREEN}✓${NORMAL} Rsync Skipped: Last sync < ${rsynccachetime} seconds ago. (${BOLD}$(date -r ${_needsync#* })${NORMAL})"
+    return 0
+  fi
+  _pmsg "Rsyncing contents of defined dirs to target."
+  for rsdir in ${rsyncdirs} ; do
+    rsdir=${rsdir/\~/${HOME}} # expand the tilde to user's home dir since bash hates ~ in a variable.
+    rsdir=${rsdir%/} # strip trailing slash.
+    _pmsg "Syncing: ${BOLD}${rsdir%/}${NORMAL} --> ${BOLD}${1}:~/${NORMAL}"
+    if rsync -az -e "ssh ${sshflags} -o \"${sshproxyconf}\"" ${rsdir}/ ${sshuser}@${1}:~/${remotedir} ; then
+      _pmsg "${BOLD}${GREEN}✓${NORMAL} Rsync Successful!  Updating the cache file."
+       sed "/${1}/d" ${rsynccachefile} > ${rsynccachefile}.tmp
+       mv ${rsynccachefile}.tmp ${rsynccachefile}
+       echo "${1} $(date +%s)" >> ${rsynccachefile}
+    else
+      _perr "${BOLD}${RED}‽ Rsync Failed! ${NORMAL}${BOLD}(Full Disk? High Load? Not Ours?)${NORMAL} Skipping this step."
+    fi
+  done
+}
+
+_ssh_to_target_ip() {
+  if [[ -n ${targetinstall} ]] ; then
+     cwdargs="cd /nas/content/live/${targetinstall}/ ; bash -l"
+     _pmsg "${_ticon} Target Directory: /nas/content/live/${BOLD}${targetinstall}${NORMAL}"
+  fi
+  if [[ -S "/tmp/${sshuser}@${1}:22" ]]; then
+    _pmsg "⚡ Reusing Existing SSH Connection to: ${BOLD}${1}${NORMAL}"
+  else
+    _pmsg "Creating SSH Connection to: ${BOLD}${1}${NORMAL}"
+  fi
+  ssh ${sshflags} -o "${sshproxyconf}" ${sshuser}@${1} -t ${cwdargs}
+}
+
+_check_ip_address() {
+  _pmsg "Running some sanity checks on IP ${BOLD}${1}${NORMAL}"
+  if [[ ${1} == ${wildstarip} ]] ; then
+    _perr "${_interrorbang} ${BOLD}${1}${NORMAL} is the ${BOLD}${RED}wildcard DNS address${NORMAL}. (pod-47)"
+  elif [[ $(whois ${1}) =~ cloudflare ]]; then
+    _perr "${_interrorbang} ${BOLD}${1}${NORMAL} is pointed to ${BOLD}${RED}☁${NORMAL} CloudFlare."
+  elif [[ $(whois ${1}) =~ Akamai ]] ; then
+    _perr "${_interrorbang} ${BOLD}${1}${NORMAL} is pointed to Akamai."
+  else
+    _pmsg "${BOLD}${GREEN}✓${NORMAL} Target IP ${BOLD}${1}${NORMAL} looks good to me. :)"
+    target=${1}
+    _pmsg "${_ticon} Target Acquired!  ${BOLD}${target}${NORMAL}"
+  fi
+}
+
+# ############################################
+# #### Utility Functions : Clusters      #####
+# ############################################
+_parse_rax_cid() {
+  if [[ $2 =~ ^[0-9]+$ ]] ; then
+    _cluster_target="web-${1}-${2}.wpengine.com"
+    _pmsg "Reqeusted a specific webhead: ${BOLD}${_cluster_target}${NORMAL}"
+    _cluster_ip=$(_dig_ip ${_cluster_target})
+    _check_ip_address $_cluster_ip
+  elif [[ $2 =~ ^u(tility)?$ ]]; then
+    _cluster_target="utility-${1}.wpengine.com"
+    _pmsg "Reqeusted the utility server: ${BOLD}${_cluster_target}${NORMAL}"
+    _cluster_ip=$(_dig_ip ${_cluster_target})
+    _check_ip_address $_cluster_ip
+  elif [[ $2 =~ ^db?|mysql|database$ ]] ; then
+    _cluster_target="dbmaster-${1}.wpengine.com"
+    _pmsg "Reqeusted the dbmaster server: ${BOLD}${_cluster_target}${NORMAL}"
+    _cluster_ip=$(_dig_ip ${_cluster_target})
+    _check_ip_address $_cluster_ip
+  elif [[ $2 =~ ^r(andom)?$ ]]; then
+    _pmsg "Requested random web. Picking from ${BOLD}lbmaster-${1}.wpengine.com"
+    _random_web=$(curl --connect-timeout ${curltimeout} -s lbmaster-${1}.wpengine.com | awk '/^HOST:/ {print $2 ".wpengine.com"}')
+    if [[ ${_random_web} =~ web-${1}-[0-9]+.wpengine.com ]]; then
+      _pmsg "Looks like we're going to ${BOLD}${_random_web}${NORMAL}"
+      _cluster_ip=$(_dig_ip ${_random_web})
+      _check_ip_address ${_cluster_ip}
+    else
+      _perr "Failed to curl a target from the LB. (Proper CID? LB down?)"
+      return 1
+    fi
+  elif [[ $2 =~ ^li?(st)? ]]; then
+    _pmsg "Getting a list of hosts in Cluster ${BOLD}${1}${NORMAL} (${BOLD}ssh pod-47 egrep 'pub-(web|utility|dbmaster)-${1}' /etc/hosts${NORMAL})"
+    _list_cluster_members ${1}
+    wedonehere=1
+  else
+    if [[ -n $2 ]] ; then
+      _perr "Wat. I don't understand ${BOLD}\"${2}\"${NORMAL} ..."
+    else
+      _perr "Please specify which server in the cluster you want to connect to:"
+    fi
+    _perr "Try adding one of the following after the CID:"
+    echo "    ${BOLD}l${NORMAL}  --  List members of CID ${1}."
+    echo "    ${BOLD}u${NORMAL}  --  ${BOLD}utility${NORMAL}-${1}.wpengine.com"
+    echo "    ${BOLD}#${NORMAL}  --  ${BOLD}web${NORMAL}-${1}-${BOLD}#${NORMAL}.wpengine.com"
+    echo "    ${BOLD}d${NORMAL}  --  ${BOLD}dbmaster${NORMAL}-${1}.wpengine.com"
+    echo "    ${BOLD}r${NORMAL}  --  ${BOLD}web${NORMAL}-${1}-${BOLD}(random)${NORMAL}.wpengine.com"
+    wedonehere=1
+  fi
+}
+
+_parse_aws_cid() {
+  if [[ $2 =~ ^[ul] ]] ; then
+    _pmsg "Getting a list of hosts in Cluster ${BOLD}${1}${NORMAL} (${BOLD}ssh pod-47 egrep 'pub-(web|utility|dbmaster)-${1}' /etc/hosts${NORMAL})"
+    _cmem=$(_list_cluster_members $1)
+  fi
+  if [[ $2 =~ ^u(tility)?$ ]] ; then
+    _pmsg "Requested ${BOLD}utility${NORMAL} server: ${BOLD}$(echo "${_cmem}"| awk '/utility-/ {print $2}')${NORMAL}"
+    _awsu=$(echo "${_cmem}" | awk '/utility-/ {print $1}')
+    _resolve_input_to_ip ${_awsu}
+  elif [[ $2 =~ ^r(andom)?$ ]] ; then
+    _pmsg "Requested random web. Picking from ${BOLD}lbmaster-${1}.wpengine.com"
+    _random_web=$(curl --connect-timeout ${curltimeout} -s lbmaster-${1}.wpengine.com | awk '/^HOST:/ {print $2}')
+    _resolve_input_to_ip ${_random_web}
+  elif [[ $2 =~ ^li?(st)? ]] ; then
+    echo "${_cmem}"
+    wedonehere=1
+  else
+    if [[ -n $2 ]] ; then
+      _perr "Wat. I don't understand ${BOLD}\"${2}\"${NORMAL}"
+    else
+      _perr "Need to specify a server in the cluster to connect to."
+    fi
+    _perr "Try adding one of the following after the CID:"
+    echo "    ${BOLD}u${NORMAL}  --  ${BOLD}utility${NORMAL}-$1-(id).wpengine.com"
+    echo "    ${BOLD}r${NORMAL}  --  ${BOLD}web${NORMAL}-$1-${BOLD}(randomid)${NORMAL}.wpengine.com"
+    echo "    ${BOLD}l${NORMAL}  --  List members of CID $1."
+    wedonehere=1
+  fi
+
+}
+
+_list_cluster_members() {
+   ssh ${sshflags} -o "${sshproxyconf}" ${sshuser}@${ip47} "LC_ALL=C egrep 'pub-(web|utility|dbmaster)-${1}' /etc/hosts" |sed 's|pub-||g' | column -t |sed 's|^|     |'
+}
+
+# ############################################
+# #### Utility Functions : Cache Mgmt    #####
+# ############################################
+_cache_utils() {
+  case ${1} in
+    clean) _clean_rsync_cache ;;
+    purge) _purge_rsync_cache ${*:2} ;;
+    *) _show_cache_help ;;
+  esac
+}
+
+_clean_rsync_cache() {
+   _pmsg "Cleaning cached entries older than ${BOLD}${rsynccachetime}${NORMAL} seconds."
+   awk '$2 > N { print } ' N=$(($(date +%s) - ${rsynccachetime})) ${rsynccachefile} > ${rsynccachefile}.tmp
+   _cache_before=$(wc -l ${rsynccachefile}| awk '{print $1}')
+   mv ${rsynccachefile}.tmp ${rsynccachefile}
+   _cache_after=$(wc -l ${rsynccachefile}| awk '{print $1}')
+   _pmsg "Cleaned! ## ${BOLD}Before:${NORMAL} $_cache_before || ${BOLD}After:${NORMAL} ${_cache_after} || ${BOLD}Cleaned:${NORMAL} $((${_cache_before} - ${_cache_after}))"
+}
+
+_purge_rsync_cache() {
+  if [[ ${1} =~ [Aa][Ll][Ll] ]]; then
+    _pmsg "Purging all entries in rsync cache!"
+    _cache_before=$(wc -l ${rsynccachefile}| awk '{print $1}')
+    > ${rsynccachefile}
+    _pmsg "Purged ${BOLD}${_cache_before}${NORMAL} entries from rsync cache."
+  elif [[ ${1} =~ ${ipregex} ]]; then
+    sed "/${1}/d" ${rsynccachefile} > ${rsynccachefile}.tmp
+    mv ${rsynccachefile}.tmp ${rsynccachefile}
+    _pmsg "Purged ${BOLD}${1}${NORMAL} from the rsync cache file."
+  else
+      _perr "Specify an ${BOLD}IP${NORMAL} to purge from the cache or ${BOLD}all${NORMAL} to empty it."
+  fi
+}
+
+_show_cache_help() {
+  echo "
+  Manage the pounce cache:  pounce cache {CMD}
+
+  clean : Delete all entries older than the configured time. (${BOLD}${rsynccachetime}${NORMAL} seconds)
+  purge : Delete a specific IP from the cache or specify 'all' to completely purge it and start fresh.
+    - pounce cache purge 1.2.3.4
+    - pounce cache purge all
+  "
+}
+# ############################################
+# #### Utility Functions : Misc Junk     #####
+# ############################################
+_usage_info(){
+   echo "
+ Pounce will let you connect to pretty much any pod based on a wide variety
+  of inputs and is very verbose in its output, offering reasons for failure
+  and error correction to avoid ~/.ssh/config problems.
+
+  Example usage:
+
+  - pounce install                      - pounce 1.2.3.4
+  - pounce install.wpengine.com         - pounce web-90000-i-fgsfds
+  - pounce CID                          - pounce pod-12345
+  - pounce 90000 (u|r|l)                - pounce web-60000-2
+  - pounce 60000 (u|d|r|l|\#)           - pounce 100000
+  - pounce https://domain.com/all/paths?arguments&and#anchor_tags_stripped
+
+ Pounce is heavily optimized for speed:
+   * Skip rsync under certain conditions: (configurable)
+     * Host IP exists in tmp file: ${BOLD}${rsynccachefile}${NORMAL}
+     * An rsync to the host has occured within ${BOLD}${rsynccachetime}${NORMAL} seconds.
+   * SSH connections to servers are re-used if enabled in the config.
+     This drastically reduces connection time if another session is already active.
+     The connection should stay open ~5 minutes after disconnect as well to hasten
+     re-connections after hitting Ctrl+D one too many times.
+   * SSH connections are only performed by IP address.  Resolved via curl.
+     This is ~1-2 seconds faster than allowing SSH to resolve the DNS.
+
+ NOTES:
+    IPs are resolved via dig +short and are subject to caching.  If the IP has updated,
+      you may need to dig +trace and connect via the new IP address.
+    Rsync cache can be managed with the 'pounce cache' command. (run it for info)
+"
+  wedonehere=1
+}
+
+# ############################################
+# #### It's time for the main attraction #####
+# ############################################
+
+
+case ${1} in
+  cache) _cache_utils ${*:2} ; exit ;;
+esac
+
+unset targetip
+_resolve_input_to_ip $* # sets ${targetip} to IP address.
+if [[ -z ${target} && -z ${wedonehere} ]] ; then
+  _perr "Well this didn't go well.  Better luck next time."
+elif [[ -z ${wedonehere} ]]; then
+  _rsync_if_needed ${target}
+  _ssh_to_target_ip ${target}
+fi

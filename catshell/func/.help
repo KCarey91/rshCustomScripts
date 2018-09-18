@@ -1,0 +1,2 @@
+# Functions that are included when .bash_profile / .bashrc is sourced and are called like normal commands.
+# These are mostly what would normally be called one-liners but put into a sourceable format with better spacing.
